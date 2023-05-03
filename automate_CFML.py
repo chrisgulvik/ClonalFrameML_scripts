@@ -2,7 +2,7 @@
 from __future__ import division  #enforce floating point division
 
 __author__ = 'Christopher A. Gulvik'
-__version__ = '1.0'
+__version__ = '1.1.0'
 
 import argparse
 import fileinput
@@ -26,6 +26,7 @@ def parseArgs():
 	parser.add_argument('-o', '--outpath', required=False, default='./auto-CFML_output', help='Name of output folder. Default is "./auto-CFML_output".')
 	parser.add_argument('-b', '--boots', required=False, type=int, default='100', help='Number of bootstraps for PhyML. Default is "100".')
 	parser.add_argument('-s', '--esims', required=False, type=int, default='20', help='Number of uncertainty estimate simulations for CFML. Default is "20".')
+	parser.add_argument('-x', '--xmfa', required=False, action='store_true', default=False, help='Input FASTA is XMFA format. Default is False.')
 	args = parser.parse_args()
 	return args
 
@@ -42,7 +43,7 @@ def fa2phy(fasta, outphy):
 	with open(fasta) as handle:
 		records = AlignIO.parse(handle, 'fasta')
 		with open(outphy, 'w') as out:
-			AlignIO.write(records, out, 'phylip')
+			AlignIO.write(records, out, 'phylip-relaxed')
 
 def runPhyML(phyl, base, boots, outpath, freqs, kappa, alpha, search, xopts):
 	""" runs PhyML to estimate parameters for ClonalFrameML """
@@ -71,20 +72,20 @@ def getPhyMLest(path, base, ext):
 		phymlstats = pstats.read().replace('\n', '')
 
 	# Nucleotides frequencies
-	fA = re.search(r'f\(A\)= (0.\d+)', phymlstats)
-	fT = re.search(r'f\(T\)= (0.\d+)', phymlstats)
-	fC = re.search(r'f\(C\)= (0.\d+)', phymlstats)
-	fG = re.search(r'f\(G\)= (0.\d+)', phymlstats)
+	fA = re.search(r'f\(A\)=\s+(0.\d+)', phymlstats)
+	fT = re.search(r'f\(T\)=\s+(0.\d+)', phymlstats)
+	fC = re.search(r'f\(C\)=\s+(0.\d+)', phymlstats)
+	fG = re.search(r'f\(G\)=\s+(0.\d+)', phymlstats)
 	freqs = '%s,%s,%s,%s' % (fA.group(1), fC.group(1), fG.group(1), fT.group(1))  # Order (A,C,G,T) matters for PhyML
 	logging.info ('Calculated %s frequencies of A,T,C,G from PhyML tree' % freqs)
 
 	# Transition mutations relative to transversion events
-	A2C = re.search(r'A <\-> C    (\d+.\d+)', phymlstats)
-	A2G = re.search(r'A <\-> G    (\d+.\d+)', phymlstats)
-	A2T = re.search(r'A <\-> T    (\d+.\d+)', phymlstats)
-	C2G = re.search(r'C <\-> G    (\d+.\d+)', phymlstats)
-	C2T = re.search(r'C <\-> T    (\d+.\d+)', phymlstats)
-	G2T = re.search(r'G <\-> T    (\d+.\d+)', phymlstats)
+	A2C = re.search(r'A <\-> C\s+(\d+.\d+)', phymlstats)
+	A2G = re.search(r'A <\-> G\s+(\d+.\d+)', phymlstats)
+	A2T = re.search(r'A <\-> T\s+(\d+.\d+)', phymlstats)
+	C2G = re.search(r'C <\-> G\s+(\d+.\d+)', phymlstats)
+	C2T = re.search(r'C <\-> T\s+(\d+.\d+)', phymlstats)
+	G2T = re.search(r'G <\-> T\s+(\d+.\d+)', phymlstats)
 	Transitions = (Decimal(A2G.group(1)) + Decimal(C2T.group(1))) # A<->G && C<->T
 	logging.info ('Calculated %s transitions from PhyML statistics' % Transitions)
 	Transversions = (Decimal(A2C.group(1)) + Decimal(A2T.group(1)) + Decimal(C2G.group(1)) + Decimal(G2T.group(1)))  # All (4) others
@@ -92,7 +93,7 @@ def getPhyMLest(path, base, ext):
 	TsTv = (Transitions / Transversions).quantize(Decimal('.000001'), rounding=ROUND_UP)
 
 	# Shape of gamma distribution
-	gammaShape = re.search('Gamma shape parameter: 		(\d+.\d+)', phymlstats)
+	gammaShape = re.search(r'Gamma shape parameter:\s+(\d+.\d+)', phymlstats)
 	alpha = gammaShape.group(1)
 	logging.info ('Calculated alpha as %s from PhyML statistics' % alpha)
 	return alpha, TsTv, freqs
@@ -167,14 +168,19 @@ def main():
 		ext = '.phy'
 	phyl = os.path.join(path, base + ext)
 
+	if opts.xmfa:
+		fasta = '-xmfa_file ' + os.path.realpath(os.path.expanduser(opts.fasta))
+	else:
+		fasta = os.path.realpath(os.path.expanduser(opts.fasta))
+
 	# The meat
-	runPhyML(phyl, base, opts.boots, opts.outpath, "m", "e", "e", "BEST", "-o lr")
+	runPhyML(phyl, base, opts.boots, opts.outpath, "m", "e", "e", "NNI", "-o lr")
 	brDisp = getBrDisp(base, ext)
 	(alpha, kappa, freqs) = getPhyMLest(path, base, ext)
 	runPhyML(phyl, base, opts.boots, opts.outpath, freqs, kappa, alpha, "NNI", " ")
-	runClonalFrameMLBW(path, base, ext, opts.fasta, opts.outpath, brDisp, kappa, opts.esims)
+	runClonalFrameMLBW(path, base, ext, fasta, opts.outpath, brDisp, kappa, opts.esims)
 	CFMLvals = getCFMLest(path, base)
-	runClonalFrameMLEM(path, base, ext, opts.fasta, opts.outpath, brDisp, kappa, CFMLvals)
+	runClonalFrameMLEM(path, base, ext, fasta, opts.outpath, brDisp, kappa, CFMLvals)
 	logging.info('completed')
 
 
